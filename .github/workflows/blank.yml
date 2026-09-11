@@ -1,0 +1,78 @@
+on:
+  schedule:
+    # 每 6 小时跑一次（UTC）；手动触发见 workflow_dispatch
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_tls:
+        description: "TLS 延迟上限 (ms)"
+        required: false
+        default: "100"
+      min_speed:
+        description: "速度下限 (Mbps)"
+        required: false
+        default: "10"
+      limit:
+        description: "最多输出条数，0=不限"
+        required: false
+        default: "0"
+
+permissions:
+  contents: write
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 筛选 Cloudflare IP
+        run: |
+          MAX_TLS="${{ github.event.inputs.max_tls || '100' }}"
+          MIN_SPEED="${{ github.event.inputs.min_speed || '10' }}"
+          python scripts/filter.py \
+            --out ips.txt \
+            --csv-out ips_detail.csv \
+            --max-tls "$MAX_TLS" \
+            --min-speed "$MIN_SPEED" \
+            --limit "${{ github.event.inputs.limit || '0' }}" \
+            --sort tls
+          echo "MAX_TLS=$MAX_TLS" >> $GITHUB_ENV
+          echo "MIN_SPEED=$MIN_SPEED" >> $GITHUB_ENV
+
+      - name: 生成摘要
+        run: |
+          COUNT=$(wc -l < ips.txt)
+          echo "### Cloudflare IP 精选（TLS<${MAX_TLS:-100}ms，速度>${MIN_SPEED:-10}Mbps）" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "共 \`$COUNT\` 条，按 TLS 延迟升序，前 20 条：" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          head -n 20 ips.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-ips
+          path: |
+            ips.txt
+            ips_detail.csv
+
+      - name: 提交回仓库
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ips.txt ips_detail.csv
+          if git diff --cached --quiet; then
+            echo "无变化，跳过提交"
+          else
+            git commit -m "chore: 更新 Cloudflare IP 精选 $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
